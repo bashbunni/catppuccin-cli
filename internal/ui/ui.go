@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -10,7 +11,15 @@ var p *tea.Program
 
 func Run() {
 	// init models, we can reset them at any time anyway
-	models = []tea.Model{NewInitialModel(), NewExecModel(), NewInstallModel(), NewSpinnerParent()}
+	// models = []tea.Model{NewInitialModel(), NewExecModel(), NewInstallModel(), NewSpinnerParent(), NewProgressBar()}
+	f, err := tea.LogToFile("debug.log", "debug")
+	if err != nil {
+		fmt.Println("fatal:", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	models = []tea.Model{NewInitialModel(), NewExecModel(), NewInstallModel(), NewProgressBar()}
 	m := models[initialView]
 	p := tea.NewProgram(m)
 	if err := p.Start(); err != nil {

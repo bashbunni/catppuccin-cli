@@ -30,3 +30,5 @@ cli
 
 # custom
 stage/
+
+debug.log

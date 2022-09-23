@@ -2,23 +2,43 @@ package ui
 
 import (
 	"fmt"
-	"regexp"
-	"strconv"
-	"strings"
+	"log"
 	"time"
 
 	"github.com/catppuccin/cli/internal/utils"
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/go-git/go-git/v5"
 )
+
+/*
+CURRENT STRUGGLE:
+hard to get clone progress. sideband.Progress is mostly useless for this
+https://github.com/src-d/go-git/issues/549
+*/
 
 type progressMsg float64 // Progress
 
 type finishMsg string // Finish
 
-type GitProgress struct {
-	Progress int
+type ProgressWriter struct {
+	// total bytes downloaded
+	downloaded int
+	// total size of the file(s)
+	total             int
+	calculateProgress func(float64)
+}
+
+// make GitProgress implement io.Writer so we can store the git clone progress
+// to this struct
+func (g *ProgressWriter) Write(p []byte) (n int, err error) {
+	log.Println(string(p))
+	g.downloaded += len(p)
+	if g.total > 0 {
+		g.calculateProgress(float64(g.downloaded) / float64(g.total))
+	}
+	return len(p), nil
 }
 
 func NewProgressBar() ProgressWrapper {
@@ -27,12 +47,24 @@ func NewProgressBar() ProgressWrapper {
 	}
 }
 
+// I feel like this should be running in a go routine and sending data to the
+// BBT TUI with messages
+
 // CloneRepo clones a repo into the specified location.
 func CloneRepo(stagePath string, repo string) string {
+	log.Print("in clone repo")
 	org := utils.GetEnv("ORG_OVERRIDE", "catppuccin")
-	gitProgress := GitProgress{
-		Progress: 0,
+	gitProgress := &ProgressWriter{
+		downloaded: 0,
+		calculateProgress: func(ratio float64) {
+			log.Printf("in calculate progress: %f", ratio)
+			if p != nil {
+				p.Send(progressMsg(ratio))
+			}
+		},
 	}
+	// idk how this works, I think it is writing to gitProgress each time...
+	// maybe include p.Send in Write? already doing in calculateProgress
 	_, err := git.PlainClone(stagePath, false, &git.CloneOptions{
 		URL:      fmt.Sprintf("https://github.com/%s/%s.git", org, repo),
 		Progress: gitProgress,
@@ -40,43 +72,25 @@ func CloneRepo(stagePath string, repo string) string {
 	if err != nil {
 		fmt.Println(err)
 	}
+	// TODO: I think this might need to be a command that can get reused
 	return stagePath
 }
 
 func StartClone(repo string) tea.Cmd {
 	return func() tea.Msg {
+		log.Print("in start clone")
 		CloneRepo(utils.GetTemplateDir(repo), "template")
 		return nil
 	}
 }
 
-// Regex to get the percentage in a subgroup
-var re *regexp.Regexp = regexp.MustCompile(`Compressing objects: \s*(\d*)%`)
-var reEnd = regexp.MustCompile(`Resolving deltas: \s*(\d*)%`)
-
-// Write intercepts the content and updates the percentage
-func (g GitProgress) Write(raw []byte) (n int, err error) {
-	data := string(raw)
-	matches := re.FindStringSubmatch(data)
-	if len(matches) > 1 {
-		deltaMatch := reEnd.FindStringSubmatch(data) // Please delete this. This does not work at all. :sadge:
-		if !strings.Contains(deltaMatch[1], "Resolving deltas") {
-			percentage, _ := strconv.Atoi(matches[1])
-			g.Progress = percentage
-			p.Send(progressMsg(percentage / 100)) // Send the progressMsg out
-		} else {
-			p.Send(finishMsg(deltaMatch[1])) // This should, in theory, send out finishMsg, but it does not.
-		}
-	}
-	return len(raw), err
-}
-
 func finalPause() tea.Cmd {
-	return tea.Tick(time.Millisecond*750, func(_ time.Time) tea.Msg {
-		return nil
+	return tea.Tick(time.Second*10, func(time.Time) tea.Msg {
+		return tea.Quit
 	})
 }
 
+// TODO: include this somewhere it will be seen
 type ProgressWrapper struct {
 	progress progress.Model
 }
@@ -87,30 +101,26 @@ func (m ProgressWrapper) Init() tea.Cmd {
 
 func (m ProgressWrapper) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		return m, tea.Quit // Just quit
 	case progressMsg:
 		var cmds []tea.Cmd
-
 		if msg >= 1.0 {
 			cmds = append(cmds, tea.Sequentially(finalPause(), tea.Quit))
 		}
-
-		cmds = append(cmds, m.progress.SetPercent(float64(msg))) // Set the progress
+		cmds = append(cmds, m.progress.SetPercent(float64(msg)))
 		return m, tea.Batch(cmds...)
+	case tea.KeyMsg:
+		return m, tea.Quit // Just quit
 	case progress.FrameMsg:
 		// Update bar
 		progressModel, cmd := m.progress.Update(msg)
 		m.progress = progressModel.(progress.Model)
 		return m, cmd
 	case finishMsg:
-		return m, tea.Quit
+		return m, finalPause()
 	}
 	return m, nil
 }
 
 func (m ProgressWrapper) View() string {
-	return "\nDownloading...\n" +
-		m.progress.View() + "\n\n" +
-		"Press any key to quit"
+	return lipgloss.JoinVertical(lipgloss.Left, "Downloading...", m.progress.View(), "Press any key to quit")
 }
